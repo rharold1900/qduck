@@ -1,5 +1,8 @@
 # qduck
 
+
+![Project Logo](assets/qduck.png)
+
 `qduck` is a small quantum-safe encryption toolkit designed to be easy to use.
 
 It provides only primitives:
