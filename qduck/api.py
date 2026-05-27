@@ -44,6 +44,7 @@ from .crypto import (
 )
 from .exceptions import DecryptionError, KeyFormatError, QDuckError
 
+MAX_ONESHOT_FILE_BYTES = (2**31) - 1
 
 def generate_keypair() -> tuple[bytes, bytes]:
     """Generate a raw X25519 + ML-KEM-768 hybrid keypair.
@@ -244,7 +245,18 @@ def encrypt_file(
         The destination is written via a sibling temp file + atomic rename,
         so callers never observe a partially written ciphertext.
     """
-    plaintext = Path(src_path).read_bytes()
+
+    src = Path(src_path)
+    file_size = src.stat().st_size
+
+    if file_size > MAX_ONESHOT_FILE_BYTES:
+        raise ValueError(
+            f"File too large for qduck.encrypt_file() one-shot mode: "
+            f"{file_size} bytes. Max is {MAX_ONESHOT_FILE_BYTES} bytes. "
+            f"Use a smaller file or wait for streaming file encryption support."
+        )
+
+    plaintext = src.read_bytes()
     ciphertext = aes_gcm_encrypt(plaintext, aes_key, aad=aad)
     _atomic_write(dst_path, ciphertext, 0o644, overwrite=overwrite)
 
@@ -276,7 +288,16 @@ def decrypt_file(
         DecryptionError: AES-GCM tag failed, bad key, corrupt input, or
             mismatched aad.
     """
-    ciphertext = Path(src_path).read_bytes()
+    src = Path(src_path)
+    file_size = src.stat().st_size
+
+    if file_size > MAX_ONESHOT_FILE_BYTES + 1024:
+        raise ValueError(
+            f"Encrypted file too large for qduck.decrypt_file() one-shot mode: "
+            f"{file_size} bytes. Streaming decrypt is not yet supported."
+        )
+
+    ciphertext = src.read_bytes()    
     plaintext = aes_gcm_decrypt(ciphertext, aes_key, aad=aad)
     _atomic_write(dst_path, plaintext, 0o600, overwrite=overwrite)
 

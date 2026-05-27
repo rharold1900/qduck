@@ -239,6 +239,9 @@ For high-throughput applications, a common pattern is:
 3. Reuse the AES key for many encrypted blobs
 4. Use AES-GCM authenticated additional data (`aad=key_block`) to bind ciphertexts to the negotiated session
 
+## Install from GitHub
+pip install "qduck @ git+https://github.com/rharold1900/qduck.git@v0.2.3"
+
 ## Status
 
 `qduck` is **experimental** and has **not been independently audited**. The cryptographic primitives it composes (X25519, ML-KEM-768, HKDF-SHA256, AES-256-GCM) are all standard and come from the `cryptography` library, but qduck's specific composition has not undergone third-party security review. Use at your own risk for production data.
