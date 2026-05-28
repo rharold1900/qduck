@@ -11,7 +11,7 @@ It intentionally exposes only a few primitives:
 3. Recipient side: recover the same AES-256 key from the key block.
 4. Encrypt/decrypt in-memory blobs with AES-256-GCM.
 5. Encrypt/decrypt files on disk with a chunked AES-256-GCM qduck file format.
-
+ 
 No HTTP. No sessions. No server framework. Callers compose the primitives however they want. HTTP transport and server-framework adapters can live in separate companion packages so this core package stays dependency-light.
 
 ## Status
@@ -41,7 +41,7 @@ pip install -e ".[dev]"
 Or from GitHub after tagging:
 
 ```bash
-pip install "qduck @ git+https://github.com/rharold1900/qduck.git@v0.2.3"
+pip install "qduck @ git+https://github.com/rharold1900/qduck.git@v0.2.4"
 ```
 
 `qduck` requires `cryptography>=48.0.0`. `cryptography` 48.0.0 added ML-KEM key encapsulation support for OpenSSL 3.5.0+ and notes that the PyPI wheels expose post-quantum algorithms to wheel users. If your environment builds `cryptography` from source against an older or unusual crypto backend, ML-KEM may still be unavailable at runtime; in that case `qduck` raises `QDuckError` with an upgrade/rebuild message.
