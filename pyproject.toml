@@ -18,7 +18,7 @@ dependencies = [
 ]
 keywords = ["encryption", "post-quantum", "ml-kem", "x25519", "aes-gcm"]
 classifiers = [
-  "Development Status :: 3 - Beta",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
