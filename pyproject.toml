@@ -7,7 +7,7 @@ name = "qduck"
 version = "0.2.4"
 description = "Simple hybrid post-quantum file and blob encryption for Python."
 readme = "README.md"
-requires-python = ">=3.10" 
+requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [
@@ -20,7 +20,6 @@ keywords = ["encryption", "post-quantum", "ml-kem", "x25519", "aes-gcm"]
 classifiers = [
   "Development Status :: 3 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -38,11 +37,10 @@ dev = [
 [project.scripts]
 qduck-keygen = "qduck.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["qduck*"]
-
-
 [project.urls]
 Homepage = "https://github.com/rharold1900/qduck"
 Repository = "https://github.com/rharold1900/qduck"
 Issues = "https://github.com/rharold1900/qduck/issues"
+
+[tool.setuptools.packages.find]
+include = ["qduck*"]
