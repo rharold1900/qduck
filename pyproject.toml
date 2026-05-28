@@ -1,19 +1,32 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "qduck"
-version = "0.2.0"
-description = "A small X25519 + ML-KEM-768 hybrid encryption toolkit."
+version = "0.2.3"
+description = "Simple hybrid post-quantum file and blob encryption for Python."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
   { name = "Rick Harold" }
 ]
 dependencies = [
-  "cryptography>=47.0.0"
+  "cryptography>=48.0.0"
+]
+keywords = ["encryption", "post-quantum", "ml-kem", "x25519", "aes-gcm"]
+classifiers = [
+  "Development Status :: 3 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security :: Cryptography",
 ]
 
 [project.optional-dependencies]
@@ -29,5 +42,6 @@ include = ["qduck*"]
 
 
 [project.urls]
-Homepage = "https://github.com/rickharold1900/qduck"
-Repository = "https://github.com/rickharold1900/qduck"
+Homepage = "https://github.com/rharold1900/qduck"
+Repository = "https://github.com/rharold1900/qduck"
+Issues = "https://github.com/rharold1900/qduck/issues"

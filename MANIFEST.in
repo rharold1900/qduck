@@ -1,8 +1,18 @@
 include LICENSE
 include NOTICE
 include README.md
+recursive-include assets *.png *.jpg *.jpeg *.svg
 include pyproject.toml
 recursive-include examples *.py
 recursive-include tests *.py
 global-exclude __pycache__
 global-exclude *.py[cod]
+
+global-exclude .DS_Store
+global-exclude __MACOSX/*
+global-exclude .pytest_cache/*
+global-exclude .venv/*
+prune .git
+prune .venv
+prune .pytest_cache
+prune qduck.egg-info

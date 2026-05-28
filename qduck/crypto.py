@@ -74,7 +74,7 @@ def _hkdf_hybrid_secret(mlkem_secret: bytes, x25519_secret: bytes) -> bytes:
     return HKDF(
         algorithm=hashes.SHA256(),
         length=AES_KEY_SIZE,
-        salt=None,
+        salt=None,  # IKM is already uniformly random; zero salt is per RFC 5869 §2.2
         info=_HKDF_INFO,
     ).derive(mlkem_secret + x25519_secret)
 

@@ -301,19 +301,31 @@ MIN_FILE_SIZE = HEADER_FIXED_LEN + CHUNK_LEN_FLAG_SIZE + TAG_SIZE
 
 
 __all__ = [
+    # Format identity
     "MAGIC",
     "VERSION",
     "FLAG_HAS_KEY_BLOCK",
+    # Algorithm IDs
     "ALG_AES256_GCM",
     "KEM_MLKEM768_X25519",
     "KDF_HKDF_SHA256",
+    # Header layout
     "HEADER_FIXED_LEN",
     "BASE_NONCE_SIZE",
+    "COUNTER_SIZE",
+    # Chunk framing
+    "CHUNK_LEN_FLAG_SIZE",
+    "CHUNK_FINAL_BIT",
+    "CHUNK_LEN_MASK",
+    "CHUNK_AAD_PREFIX",
+    # Chunk-size policy
     "DEFAULT_CHUNK_SIZE",
     "MIN_CHUNK_SIZE",
     "MAX_CHUNK_SIZE",
+    # Derived sizes
     "MIN_FILE_SIZE",
     "AES_KEY_SIZE",
+    # Functions
     "validate_chunk_size",
     "pack_header",
     "unpack_header",

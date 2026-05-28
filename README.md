@@ -1,21 +1,30 @@
 # qduck
 
-
 ![Project Logo](assets/qduck.png)
 
-`qduck` is a small quantum-safe encryption toolkit designed to be easy to use.
+`qduck` is a small Python encryption toolkit that makes hybrid post-quantum encryption easy to use.
 
-It provides only primitives:
+It intentionally exposes only a few primitives:
 
 1. Generate an X25519 + ML-KEM-768 hybrid keypair.
-2. Client side: derive a 32-byte AES-256 key and a 1120-byte key block for the server.
-3. Server side: recover the same AES-256 key from the key block.
+2. Client side: derive a 32-byte AES-256 key and a 1120-byte key block for the recipient.
+3. Recipient side: recover the same AES-256 key from the key block.
 4. Encrypt/decrypt in-memory blobs with AES-256-GCM.
-5. Encrypt/decrypt files on disk with the same AES-256-GCM construction.
+5. Encrypt/decrypt files on disk with a chunked AES-256-GCM qduck file format.
 
-No HTTP. No sessions. No server framework. Callers compose the primitives however they want. HTTP transport and server-framework adapters are planned as separate companion packages (`qduck-client`, `qduck-server`) so the core stays dependency-light.
+No HTTP. No sessions. No server framework. Callers compose the primitives however they want. HTTP transport and server-framework adapters can live in separate companion packages so this core package stays dependency-light.
+
+## Status
+
+`qduck` is **experimental** and has **not been independently audited**. The cryptographic primitives it composes — X25519, ML-KEM-768, HKDF-SHA256, and AES-256-GCM — are standard primitives exposed by the `cryptography` package, but qduck's specific composition and file format have not undergone third-party security review.
+
+Use at your own risk for production data.
 
 ## Install
+
+```bash
+pip install qduck
+```
 
 From a clone:
 
@@ -23,13 +32,19 @@ From a clone:
 pip install -e .
 ```
 
-Eventually from PyPI:
+With test tools:
 
 ```bash
-pip install qduck
+pip install -e ".[dev]"
 ```
 
-`qduck` requires `cryptography>=47.0.0`. Starting with this version, the official PyPI wheels are built against OpenSSL 3.5+, which should expose ML-KEM-768 in most installations. There are a few setups where ML-KEM may still be unavailable at runtime — for example, environments that build `cryptography` from source against an older system OpenSSL (<3.5), or unusual platforms without a current wheel. In those cases, `qduck` raises `QDuckError` with a clear message; the fix is to upgrade `cryptography` so it links against OpenSSL 3.5+, AWS-LC, or BoringSSL.
+Or from GitHub after tagging:
+
+```bash
+pip install "qduck @ git+https://github.com/rharold1900/qduck.git@v0.2.3"
+```
+
+`qduck` requires `cryptography>=48.0.0`. `cryptography` 48.0.0 added ML-KEM key encapsulation support for OpenSSL 3.5.0+ and notes that the PyPI wheels expose post-quantum algorithms to wheel users. If your environment builds `cryptography` from source against an older or unusual crypto backend, ML-KEM may still be unavailable at runtime; in that case `qduck` raises `QDuckError` with an upgrade/rebuild message.
 
 ## Public API
 
@@ -39,7 +54,7 @@ Use the package root:
 import qduck
 ```
 
-Or import from the single API facade:
+Or import from the facade:
 
 ```python
 from qduck.api import derive_key, encrypt_blob
@@ -59,17 +74,32 @@ qduck.recover_key(private_key: bytes, key_block: bytes) -> bytes
 qduck.encrypt_blob(data: bytes, aes_key: bytes, aad: bytes | None = None) -> bytes
 qduck.decrypt_blob(ciphertext: bytes, aes_key: bytes, aad: bytes | None = None) -> bytes
 
-qduck.encrypt_file(src_path: str, dst_path: str, aes_key: bytes,
-                   aad: bytes | None = None, overwrite: bool = False) -> None
-qduck.decrypt_file(src_path: str, dst_path: str, aes_key: bytes,
-                   aad: bytes | None = None, overwrite: bool = False) -> None
+qduck.encrypt_file(src_path: str,
+                   dst_path: str,
+                   aes_key: bytes,
+                   aad: bytes | None = None,
+                   overwrite: bool = False,
+                   chunk_size: int = 1024 * 1024,
+                   key_block: bytes | None = None) -> None
+
+qduck.decrypt_file(src_path: str,
+                   dst_path: str,
+                   aes_key: bytes,
+                   aad: bytes | None = None,
+                   overwrite: bool = False) -> None
+
+qduck.decrypt_file_with_private_key(src_path: str,
+                                    dst_path: str,
+                                    private_key: bytes,
+                                    aad: bytes | None = None,
+                                    overwrite: bool = False) -> None
 
 qduck.QDuckError
 qduck.DecryptionError
 qduck.KeyFormatError
 ```
 
-Internally, `qduck/api.py` is the facade. `qduck/crypto.py` is the only file that imports from `cryptography`.
+Internally, `qduck/api.py` is the public facade. `qduck/crypto.py` is the only module that imports from `cryptography`.
 
 ## Key generation
 
@@ -77,80 +107,118 @@ Internally, `qduck/api.py` is the facade. `qduck/crypto.py` is the only file tha
 qduck-keygen --public public.key --private private.key
 ```
 
-The private key file is created atomically (temp file + rename) with `0o600` permissions. The public key is created atomically with `0o644` permissions. Existing files are refused unless `--force` is passed.
+The private key file is created atomically with `0o600` permissions. The public key is created atomically with `0o644` permissions. Existing files are refused unless `--force` is passed.
 
-## Minimal usage
-
-### In-memory (blob API)
+## Minimal blob usage
 
 ```python
 import qduck
 
-# === one-time setup ===
 qduck.save_keypair("public.key", "private.key")
 
-# === client side ===
 public_key = qduck.load_public_key("public.key")
 aes_key, key_block = qduck.derive_key(public_key)
 
-ciphertext = qduck.encrypt_blob(b"the contents of my secret message", aes_key)
+ciphertext = qduck.encrypt_blob(
+    b"the contents of my secret message",
+    aes_key,
+    aad=key_block,
+)
 
-# the client now ships two things to the server however it wants:
-#   1. key_block   (1120 bytes)
-#   2. ciphertext  (whatever size)
-
-# === server side ===
 private_key = qduck.load_private_key("private.key")
-aes_key = qduck.recover_key(private_key, key_block)
-plaintext = qduck.decrypt_blob(ciphertext, aes_key)
+server_aes_key = qduck.recover_key(private_key, key_block)
+plaintext = qduck.decrypt_blob(ciphertext, server_aes_key, aad=key_block)
 ```
 
-### On disk (file API)
+## Minimal file usage: external key block
 
 ```python
 import qduck
 
-# === client side ===
 public_key = qduck.load_public_key("public.key")
 aes_key, key_block = qduck.derive_key(public_key)
 
-qduck.encrypt_file("message.txt", "message.txt.enc", aes_key)
-# ship message.txt.enc and key_block to the server
+qduck.encrypt_file(
+    "message.txt",
+    "message.txt.qduck",
+    aes_key,
+    aad=key_block,
+)
 
-# === server side ===
 private_key = qduck.load_private_key("private.key")
-aes_key = qduck.recover_key(private_key, key_block)
-
-qduck.decrypt_file("message.txt.enc", "message.recovered.txt", aes_key)
+server_aes_key = qduck.recover_key(private_key, key_block)
+qduck.decrypt_file(
+    "message.txt.qduck",
+    "message.recovered.txt",
+    server_aes_key,
+    aad=key_block,
+)
 ```
 
-`encrypt_file` and `decrypt_file` are whole-file operations using the same AES-256-GCM construction as `encrypt_blob`/`decrypt_blob`. Outputs are written via a sibling temp file plus atomic rename, so a crash mid-write never leaves a partial file behind. Encrypted output is created with `0o644` (ciphertext is safe to share); decrypted output is created with `0o600` (plaintext is treated as sensitive). Both refuse to overwrite an existing destination unless `overwrite=True` is passed.
+## Minimal file usage: embedded key block
 
-For applications that send many ciphertexts under a single negotiated session, you can pass `aad=key_block` to both `encrypt_*` and `decrypt_*` to authenticate each ciphertext to the specific handshake that produced it. See the Design notes section below.
+Use this when you want the encrypted file to carry the KEM handshake bytes inside the qduck header.
+
+```python
+import qduck
+
+public_key = qduck.load_public_key("public.key")
+aes_key, key_block = qduck.derive_key(public_key)
+
+qduck.encrypt_file(
+    "message.txt",
+    "message.txt.qduck",
+    aes_key,
+    aad=key_block,
+    key_block=key_block,
+)
+
+private_key = qduck.load_private_key("private.key")
+qduck.decrypt_file_with_private_key(
+    "message.txt.qduck",
+    "message.recovered.txt",
+    private_key,
+    aad=key_block,
+)
+```
+
+Embedding the `key_block` does **not** embed the private key or plaintext AES key. It only embeds the public KEM ciphertext/ephemeral-public material needed by the private-key holder to recover the AES key.
+
+## File format summary
+
+`encrypt_file()` uses qduck file format v3. It is chunked and does not load the whole file into memory.
+
+The header includes magic bytes, version, flags, total `header_len`, algorithm IDs, plaintext chunk size, per-file base nonce, and optional embedded key block.
+
+Each chunk stores a 4-byte ciphertext-length/final-flag prefix plus `ciphertext || AES-GCM tag`. The per-chunk nonce is recomputed as:
+
+```text
+8-byte random base nonce || 4-byte chunk counter
+```
+
+The nonce is not stored per chunk. Every chunk authenticates its header bytes, chunk counter, final-chunk flag, and caller-provided AAD. This catches header tampering, chunk payload corruption, chunk reordering, missing final chunks, and trailing bytes after the final chunk.
+
+Outputs are written via a sibling temp file plus atomic rename. Encrypted output is created with `0o644`; decrypted output is created with `0o600`. Existing destinations are refused unless `overwrite=True` is passed.
+
+Default chunk size is 1 MiB. Supported chunk sizes are 4 KiB through 64 MiB.
 
 ## Examples
 
 ```bash
-# in-process blob API smoke example
 python examples/roundtrip.py
-
-# in-process file API smoke example
+python examples/simple_blob.py
 python examples/file_roundtrip.py
+python examples/simple_file.py
 
-# on-disk client/server demo:
-#   echo "the contents of my secret message" > message.txt
-#   client encrypts message.txt -> message.txt.enc + message.keyblock
-#   server decrypts back to message.recovered.txt
 qduck-keygen --force --public public.key --private private.key
 echo "the contents of my secret message" > message.txt
 python examples/client.py
 python examples/server.py
 
-# folder tree example: encrypt mirror, decrypt mirror, then diff
 python examples/folder_roundtrip.py ./source ./encrypted ./decrypted
 ```
 
-The client/server and folder examples are not library API. They are caller code showing how to compose qduck primitives with `encrypt_file`/`decrypt_file` for a single file or a directory tree.
+The client/server and folder examples are caller code showing how to compose qduck primitives. They are not extra library APIs.
 
 ## Tests
 
@@ -159,15 +227,9 @@ pip install -e ".[dev]"
 pytest tests/
 ```
 
-For a quick smoke check without pytest installed as the runner, any individual test file can also be invoked directly:
-
-```bash
-python tests/test_roundtrip.py
-```
+Important test groups include blob roundtrip, file roundtrip, folder roundtrip, tamper failure, chunked file corruption checks, and embedded-key-block decrypt convenience API.
 
 ## Sizes
-
-Current raw byte sizes:
 
 | Item | Size |
 |---|---:|
@@ -177,6 +239,7 @@ Current raw byte sizes:
 | AES key | 32 bytes |
 | AES-GCM nonce | 12 bytes |
 | AES-GCM tag | 16 bytes |
+| qduck v3 fixed file header | 28 bytes |
 
 The public key is:
 
@@ -196,62 +259,45 @@ The key block is:
 ML-KEM-768 ciphertext (1088) || X25519 ephemeral public key (32)
 ```
 
-## Why hybrid?
-
-A hybrid construction keeps both a classical and a post-quantum component. An attacker must break both X25519 and ML-KEM-768 to recover the final AES-256 key. If ML-KEM has an undiscovered flaw, X25519 still contributes protection. If future quantum computers break X25519, ML-KEM still contributes protection.
-
-## Notes
-
-`qduck` uses `cryptography` only, with all `cryptography` imports isolated in `qduck/crypto.py`.
-
-AES-GCM nonce reuse is catastrophic. `qduck.encrypt_blob()` uses a fresh random 12-byte nonce from `os.urandom(12)` on every call and returns:
+For blob encryption, output is:
 
 ```text
-nonce || ciphertext || tag
+nonce (12) || ciphertext || tag (16)
 ```
 
-This library operates on whole inputs in memory. `encrypt_file()` reads the full file into RAM, encrypts it, and writes the ciphertext atomically; the same applies in reverse for `decrypt_file()`. For multi-gigabyte files where memory matters, chunk them outside `qduck` or use a streaming format designed for that purpose — AES-GCM produces a single authentication tag over the entire input, so any chunked variant has to define its own framing.
+For file encryption, see `qduck/file_format.py` for the exact v3 framing.
 
+## Why hybrid?
 
-## Design notes
-
-`qduck` intentionally exposes only a few primitives:
-
-- Hybrid X25519 + ML-KEM-768 key exchange
-- AES-256-GCM authenticated encryption
-- Raw bytes in / raw bytes out
-
-The library does not implement:
-
-- HTTP transport
-- Sessions
-- Authentication
-- Certificate validation
-- File transfer protocols
-- Server frameworks
-
-Developers decide how and when to transmit the `key_block`. It may be sent once per session or attached to individual packets depending on application requirements.
-
-For high-throughput applications, a common pattern is:
-
-1. Derive a session AES-256 key once using `derive_key()`
-2. Send the `key_block` once during authentication/session establishment
-3. Reuse the AES key for many encrypted blobs
-4. Use AES-GCM authenticated additional data (`aad=key_block`) to bind ciphertexts to the negotiated session
-
-## Install from GitHub
-pip install "qduck @ git+https://github.com/rharold1900/qduck.git@v0.2.3"
-
-## Status
-
-`qduck` is **experimental** and has **not been independently audited**. The cryptographic primitives it composes (X25519, ML-KEM-768, HKDF-SHA256, AES-256-GCM) are all standard and come from the `cryptography` library, but qduck's specific composition has not undergone third-party security review. Use at your own risk for production data.
+A hybrid construction keeps both a classical and a post-quantum component. The final AES-256 key is derived from both X25519 and ML-KEM-768 shared secrets. If ML-KEM has an undiscovered flaw, X25519 still contributes protection. If future quantum computers break X25519, ML-KEM still contributes protection.
 
 ## Security notes
 
-- AES-GCM requires nonce uniqueness per AES key. `encrypt_blob()` automatically generates a fresh random nonce for every encryption. Never reuse an `aes_key` across processes without ensuring nonce uniqueness.
-- **Public key authenticity is the caller's responsibility.** `qduck` performs key exchange but does not authenticate public keys. An attacker who can substitute the recipient's public key with their own can read all traffic. Authenticate public keys out of band (signatures, certificate pinning, manual fingerprint verification, etc.) before passing them to `derive_key()`.
-- `qduck` does not provide transport security, sessions, replay protection, or forward secrecy across sessions. It provides hybrid post-quantum key exchange and authenticated encryption only.
-- `qduck` is designed to make modern hybrid quantum-safe encryption simple to integrate into Python applications.
+- AES-GCM requires nonce uniqueness per AES key. `encrypt_blob()` automatically generates a fresh random 12-byte nonce per call. `encrypt_file()` uses a fresh per-file base nonce plus a per-chunk counter.
+- Public key authenticity is the caller's responsibility. `qduck` performs key exchange but does not authenticate public keys. An attacker who can substitute the recipient's public key with their own can read traffic. Authenticate public keys out of band before passing them to `derive_key()`.
+- `qduck` does not provide transport security, identity, sessions, replay protection, certificate validation, password-based encryption, or private-key management.
+- Reusing one derived AES key for many blobs/files is possible, but your application must manage session lifetime, process boundaries, replay behavior, and nonce-risk assumptions. A conservative pattern is to derive a fresh AES key per file or per short-lived session.
+- `aad=key_block` is recommended when the key block is part of the application protocol. It cryptographically binds ciphertexts to the handshake bytes that produced the AES key.
+
+## Packaging / release checklist
+
+Before publishing to PyPI:
+
+```bash
+# Remove macOS and build artifacts first
+find . -name ".DS_Store" -delete
+find . -name "__MACOSX" -type d -prune -exec rm -rf {} +
+rm -rf build dist *.egg-info .pytest_cache
+find . -name "__pycache__" -type d -prune -exec rm -rf {} +
+
+# Build, check, test
+python -m pip install --upgrade build twine
+python -m build
+python -m twine check dist/*
+pytest tests/
+```
+
+Then publish first to TestPyPI if desired, then to PyPI.
 
 ## License
 
@@ -259,4 +305,4 @@ Copyright 2026 Rick Harold
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text and [NOTICE](NOTICE) for attribution requirements.
 
-In short: you may use, modify, and redistribute `qduck` for any purpose, including commercial use, but you must retain the copyright notice, the license text, and the `NOTICE` file in any redistribution.
+In short: you may use, modify, and redistribute `qduck` for any purpose, including commercial use, but you must retain the copyright notice, the license text, and the `NOTICE` file in redistributions.
