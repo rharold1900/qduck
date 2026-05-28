@@ -10,8 +10,7 @@ import pytest
 
 import qduck
 from qduck.exceptions import DecryptionError
-from qduck.file_format import CHUNK_FINAL_BIT, CHUNK_LEN_FLAG_SIZE, MIN_CHUNK_SIZE
-
+from qduck.file_format import CHUNK_FINAL_BIT, CHUNK_LEN_FLAG_SIZE, CHUNK_LEN_MASK, MIN_CHUNK_SIZE
 
 AAD = b"test aad"
 
@@ -46,7 +45,7 @@ def _chunk_records(blob: bytes):
         prefix = blob[pos : pos + CHUNK_LEN_FLAG_SIZE]
         assert len(prefix) == CHUNK_LEN_FLAG_SIZE
         word = int.from_bytes(prefix, "big")
-        ct_len = word & ~CHUNK_FINAL_BIT
+        ct_len = word & CHUNK_LEN_MASK        
         is_final = bool(word & CHUNK_FINAL_BIT)
         payload_start = pos + CHUNK_LEN_FLAG_SIZE
         payload_end = payload_start + ct_len
