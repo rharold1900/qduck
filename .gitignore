@@ -37,3 +37,11 @@ private.key
 *.qduck
 *.bin.enc
 decrypted-message.bin
+
+# Packaging metadata
+*.whl
+*.tar.gz
+
+# Local env/config
+.env
+.env.*

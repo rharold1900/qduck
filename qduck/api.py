@@ -31,7 +31,11 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from .crypto import (
+    AES_KEY_SIZE,
     PRIVATE_KEY_SIZE,
     PUBLIC_KEY_SIZE,
     aes_gcm_decrypt,
@@ -43,8 +47,20 @@ from .crypto import (
     validate_public_key,
 )
 from .exceptions import DecryptionError, KeyFormatError, QDuckError
-
-MAX_ONESHOT_FILE_BYTES = (2**31) - 1
+from .file_format import (
+    BASE_NONCE_SIZE,
+    CHUNK_LEN_FLAG_SIZE,
+    DEFAULT_CHUNK_SIZE,
+    MAX_CHUNK_SIZE,
+    MIN_CHUNK_SIZE,
+    build_chunk_aad,
+    chunk_nonce,
+    pack_chunk_prefix,
+    pack_header,
+    unpack_chunk_prefix,
+    unpack_header,
+    validate_chunk_size,
+)
 
 def generate_keypair() -> tuple[bytes, bytes]:
     """Generate a raw X25519 + ML-KEM-768 hybrid keypair.
@@ -68,17 +84,33 @@ def _atomic_write(path: str, data: bytes, mode: int, overwrite: bool) -> None:
     create the file between the check and the rename. The rename itself is
     always atomic; the check just preserves the "refuse to clobber" intent.
     """
+    def _writer(f):
+        f.write(data)
+
+    _atomic_write_stream(path, _writer, mode, overwrite)
+
+
+def _atomic_write_stream(path, writer, mode: int, overwrite: bool) -> None:
+    """Stream-write variant of _atomic_write.
+
+    Opens a sibling temp file with the requested mode and hands a binary
+    file object to ``writer(f)``. The caller is expected to write all
+    output to ``f`` (it may call write() many times). The temp file is
+    flushed and fsync'd, then atomically renamed over the destination.
+
+    Used by encrypt_file / decrypt_file so multi-GB outputs do not have to
+    be materialized in memory before the rename.
+    """
     target = Path(path)
     if not overwrite and target.exists():
         raise FileExistsError(f"{path!r} already exists")
 
     directory = target.parent if str(target.parent) else Path(".")
-    # Temp file in the same directory so rename stays within one filesystem.
     tmp_fd, tmp_name = _mkstemp_with_mode(directory, target.name, mode)
     try:
         with os.fdopen(tmp_fd, "wb") as f:
             tmp_fd = -1
-            f.write(data)
+            writer(f)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_name, target)
@@ -218,47 +250,136 @@ def encrypt_file(
     aes_key: bytes,
     aad: Optional[bytes] = None,
     overwrite: bool = False,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    key_block: Optional[bytes] = None,
 ) -> None:
-    """Encrypt a file on disk with AES-256-GCM.
+    """Encrypt a file on disk with chunked AES-256-GCM (qduck file format v3).
 
-    Reads `src_path`, encrypts the contents with encrypt_blob(), and writes
-    the result atomically to `dst_path` with 0o644 permissions. Ciphertext
-    is safe to share, so the default mode is world-readable; tighten it on
-    the destination filesystem if your threat model requires it.
+    The plaintext is read in fixed-size chunks and each chunk is encrypted
+    independently with AES-256-GCM. A small framing header records the
+    format version, chunk size, and a random per-file base nonce; an
+    optional key_block can be embedded so the file is self-contained.
+    Memory use is bounded by ``chunk_size`` regardless of file size, so
+    multi-GB and TB-scale files work without loading anything into RAM
+    beyond one chunk.
 
     Args:
         src_path: Path to the plaintext file to read.
         dst_path: Path to write the encrypted output to.
         aes_key: 32-byte AES-256 key from derive_key()/recover_key().
-        aad: Optional additional authenticated data. Use aad=key_block when
-            you want the ciphertext authenticated to the original handshake.
+        aad: Optional additional authenticated data, applied to every
+            chunk. Decryption must supply the exact same value.
         overwrite: If False (the default), refuse to overwrite an existing
             destination. If True, replace any existing file at dst_path.
+        chunk_size: Plaintext chunk size in bytes. Default is 1 MiB, which
+            is a good balance for most machines. Tune down on memory-tight
+            hosts (minimum 4 KiB) or up for higher throughput on big
+            servers (maximum 64 MiB). The same chunk_size is recorded in
+            the file header, so decrypt_file picks it up automatically.
+        key_block: Optional KEM key block from derive_key(). When
+            provided, it is embedded in the file header so the recipient
+            can recover the AES key with just this file + their private
+            key. When omitted, key distribution is the caller's problem.
 
     Notes:
-        This is a whole-file operation: src_path is loaded into memory.
-        AES-GCM produces a single authentication tag over the entire input,
-        so chunked streaming would require a different on-disk format. For
-        multi-GB files where memory matters, encrypt in a higher layer that
-        defines its own chunking.
+        Per-chunk AAD binds each chunk to (header + counter + final flag
+        + user aad), so an attacker cannot drop, reorder, splice, or move
+        chunks between files without invalidating a GCM tag. In particular
+        the file cannot be silently truncated: the real last chunk is the
+        only one marked final.
 
-        The destination is written via a sibling temp file + atomic rename,
-        so callers never observe a partially written ciphertext.
+        Output is written via a sibling temp file + atomic rename, so
+        callers never observe a partial ciphertext.
     """
+    if not isinstance(aes_key, bytes) or len(aes_key) != AES_KEY_SIZE:
+        raise KeyFormatError(f"aes_key must be {AES_KEY_SIZE} bytes")
+    if aad is not None and not isinstance(aad, bytes):
+        raise TypeError("aad must be bytes or None")
+    validate_chunk_size(chunk_size)
 
-    src = Path(src_path)
-    file_size = src.stat().st_size
+    base_nonce = os.urandom(BASE_NONCE_SIZE)
+    header_bytes = pack_header(chunk_size, base_nonce, key_block)
+    aesgcm = AESGCM(aes_key)
 
-    if file_size > MAX_ONESHOT_FILE_BYTES:
-        raise ValueError(
-            f"File too large for qduck.encrypt_file() one-shot mode: "
-            f"{file_size} bytes. Max is {MAX_ONESHOT_FILE_BYTES} bytes. "
-            f"Use a smaller file or wait for streaming file encryption support."
+    def _writer(out):
+        out.write(header_bytes)
+        with open(src_path, "rb") as src:
+            counter = 0
+            # Read one chunk ahead so we know whether the *current* chunk
+            # is final before we encrypt it (the final flag is part of
+            # the chunk's AAD).
+            current = src.read(chunk_size)
+            while True:
+                nxt = src.read(chunk_size)
+                is_final = not nxt
+                chunk_aad = build_chunk_aad(header_bytes, counter, is_final, aad)
+                nonce = chunk_nonce(base_nonce, counter)
+                # AESGCM.encrypt returns ciphertext || tag.
+                ct = aesgcm.encrypt(nonce, current, chunk_aad)
+                # Nonce is recomputable from header + counter, so we do
+                # not store it on disk. Only ct||tag goes after the
+                # length prefix.
+                out.write(pack_chunk_prefix(len(ct), is_final))
+                out.write(ct)
+
+                if is_final:
+                    break
+                current = nxt
+                counter += 1
+                if counter > 0xFFFFFFFF:
+                    raise ValueError(
+                        "file exceeds maximum chunk count for this chunk_size; "
+                        "use a larger chunk_size"
+                    )
+
+    _atomic_write_stream(dst_path, _writer, 0o644, overwrite=overwrite)
+
+
+def decrypt_file_with_private_key(
+    src_path: str,
+    dst_path: str,
+    private_key: bytes,
+    aad: Optional[bytes] = None,
+    overwrite: bool = False,
+) -> None:
+    """Decrypt a self-contained qduck file using the recipient private key.
+
+    This convenience API is for files created with::
+
+        aes_key, key_block = derive_key(public_key)
+        encrypt_file(src, dst, aes_key, key_block=key_block, aad=aad)
+
+    The encrypted file must contain an embedded key_block in its header. This
+    function reads that key_block, recovers the AES-256 file key with
+    ``private_key``, then delegates to decrypt_file().
+
+    Args:
+        src_path: Path to the encrypted qduck file.
+        dst_path: Path to write the recovered plaintext to.
+        private_key: Raw qduck private key bytes.
+        aad: Optional additional authenticated data. Must exactly match the aad
+            passed to encrypt_file().
+        overwrite: If False, refuse to overwrite an existing destination.
+
+    Raises:
+        DecryptionError: if the file has no embedded key_block, the key cannot
+            be recovered, or chunk authentication fails.
+    """
+    validate_private_key(private_key)
+    if aad is not None and not isinstance(aad, bytes):
+        raise TypeError("aad must be bytes or None")
+
+    with open(src_path, "rb") as src:
+        _header_bytes, _chunk_size, _base_nonce, key_block = unpack_header(src)
+
+    if key_block is None:
+        raise DecryptionError(
+            "qduck file does not contain an embedded key_block; "
+            "use decrypt_file() with the AES key instead"
         )
 
-    plaintext = src.read_bytes()
-    ciphertext = aes_gcm_encrypt(plaintext, aes_key, aad=aad)
-    _atomic_write(dst_path, ciphertext, 0o644, overwrite=overwrite)
+    aes_key = recover_hybrid_key(private_key, key_block)
+    decrypt_file(src_path, dst_path, aes_key, aad=aad, overwrite=overwrite)
 
 
 def decrypt_file(
@@ -268,38 +389,95 @@ def decrypt_file(
     aad: Optional[bytes] = None,
     overwrite: bool = False,
 ) -> None:
-    """Decrypt a file produced by encrypt_file (or any encrypt_blob output).
+    """Decrypt a file produced by encrypt_file (qduck file format v3).
 
-    Reads `src_path`, decrypts the contents with decrypt_blob(), and writes
-    the plaintext atomically to `dst_path` with 0o600 permissions. Plaintext
-    on disk is treated as sensitive by default; relax the mode after the
-    fact if the recovered file is not secret.
+    Streams the file chunk by chunk, verifying each AES-GCM tag and
+    writing decrypted output as it goes. Memory use is bounded by the
+    file's recorded chunk size, not by the total file size.
 
     Args:
         src_path: Path to the encrypted file to read.
         dst_path: Path to write the recovered plaintext to.
         aes_key: 32-byte AES-256 key from derive_key()/recover_key().
-        aad: Optional additional authenticated data. Must exactly match the
-            aad passed to encrypt_file()/encrypt_blob() when this was made.
+        aad: Optional additional authenticated data. Must exactly match
+            the aad passed to encrypt_file() when this file was produced.
         overwrite: If False (the default), refuse to overwrite an existing
             destination. If True, replace any existing file at dst_path.
 
     Raises:
-        DecryptionError: AES-GCM tag failed, bad key, corrupt input, or
-            mismatched aad.
+        DecryptionError: bad magic, unsupported version, truncated file,
+            missing final chunk, or any per-chunk AES-GCM tag failure.
+
+    Notes:
+        Output is written to a sibling temp file and only renamed into
+        place after the final chunk authenticates. If any chunk fails
+        verification the partial output is removed and no destination
+        file is created.
     """
-    src = Path(src_path)
-    file_size = src.stat().st_size
+    if not isinstance(aes_key, bytes) or len(aes_key) != AES_KEY_SIZE:
+        raise DecryptionError(f"aes_key must be {AES_KEY_SIZE} bytes")
+    if aad is not None and not isinstance(aad, bytes):
+        raise TypeError("aad must be bytes or None")
 
-    if file_size > MAX_ONESHOT_FILE_BYTES + 1024:
-        raise ValueError(
-            f"Encrypted file too large for qduck.decrypt_file() one-shot mode: "
-            f"{file_size} bytes. Streaming decrypt is not yet supported."
-        )
+    def _writer(out):
+        with open(src_path, "rb") as src:
+            header_bytes, chunk_size, base_nonce, _key_block = unpack_header(src)
+            # chunk_size from the header is trusted only insofar as it
+            # passed validate_chunk_size inside unpack_header. We do not
+            # ever allocate based on attacker-controlled sizes without
+            # that bound check, so this is safe.
+            aesgcm = AESGCM(aes_key)
+            counter = 0
+            saw_final = False
+            # Maximum on-disk ct||tag for one chunk: plaintext at most
+            # chunk_size bytes, plus a 16-byte GCM tag.
+            max_chunk_payload = chunk_size + 16
+            while True:
+                prefix = src.read(CHUNK_LEN_FLAG_SIZE)
+                if not prefix:
+                    raise DecryptionError(
+                        "qduck file truncated: missing final chunk"
+                    )
+                ct_len, is_final = unpack_chunk_prefix(prefix)
+                if ct_len < 16:
+                    raise DecryptionError("chunk too short to contain GCM tag")
+                if ct_len > max_chunk_payload:
+                    raise DecryptionError(
+                        f"qduck file declares oversized chunk ({ct_len} bytes)"
+                    )
 
-    ciphertext = src.read_bytes()    
-    plaintext = aes_gcm_decrypt(ciphertext, aes_key, aad=aad)
-    _atomic_write(dst_path, plaintext, 0o600, overwrite=overwrite)
+                ct_and_tag = src.read(ct_len)
+                if len(ct_and_tag) != ct_len:
+                    raise DecryptionError("qduck file truncated mid-chunk")
+
+                nonce = chunk_nonce(base_nonce, counter)
+                chunk_aad = build_chunk_aad(header_bytes, counter, is_final, aad)
+                try:
+                    pt = aesgcm.decrypt(nonce, ct_and_tag, chunk_aad)
+                except InvalidTag as exc:
+                    raise DecryptionError(
+                        f"AES-GCM authentication failed on chunk {counter}"
+                    ) from exc
+                out.write(pt)
+
+                if is_final:
+                    saw_final = True
+                    # Refuse trailing bytes after the final chunk.
+                    trailing = src.read(1)
+                    if trailing:
+                        raise DecryptionError(
+                            "qduck file has trailing bytes after final chunk"
+                        )
+                    break
+
+                counter += 1
+                if counter > 0xFFFFFFFF:
+                    raise DecryptionError("qduck file has too many chunks")
+
+            if not saw_final:  # pragma: no cover (loop guarantees this)
+                raise DecryptionError("qduck file missing final chunk")
+
+    _atomic_write_stream(dst_path, _writer, 0o600, overwrite=overwrite)
 
 
 __all__ = [
@@ -316,4 +494,5 @@ __all__ = [
     "decrypt_blob",
     "encrypt_file",
     "decrypt_file",
+    "decrypt_file_with_private_key",
 ]

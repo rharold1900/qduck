@@ -18,6 +18,7 @@ from .api import (
     QDuckError,
     decrypt_blob,
     decrypt_file,
+    decrypt_file_with_private_key,
     derive_key,
     encrypt_blob,
     encrypt_file,
@@ -42,4 +43,5 @@ __all__ = [
     "decrypt_blob",
     "encrypt_file",
     "decrypt_file",
+    "decrypt_file_with_private_key",
 ]
