@@ -3,7 +3,7 @@
 ![Project Logo](assets/qduck.png)
 
 `qduck` is a small Python encryption toolkit that makes hybrid post-quantum encryption easy to use.
-
+     
 It intentionally exposes only a few primitives:
 
 1. Generate an X25519 + ML-KEM-768 hybrid keypair.
@@ -298,6 +298,14 @@ pytest tests/
 ```
 
 Then publish first to TestPyPI if desired, then to PyPI.
+
+## Why QDuck?
+
+QDuck stands for **Quantum Duck**.
+
+The project was named in honor of our kids' pet ducks. The goal of QDuck is to make modern hybrid post-quantum encryption simple enough that developers can adopt it without becoming cryptography experts.
+
+As for the ducks... they seem to know more about quantum entanglement than the rest of us.
 
 ## License
 
